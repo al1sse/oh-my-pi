@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pi.admitUserMessage(content)` for extensions that must not have their input merged into a run they do not own: it reserves the session atomically, refuses with a bounded reason (`busy`, `compacting`, `pending_message`, `not_started`) instead of steering, and resolves with the native session entry id of the admitted input once that entry is persisted.
+
 ### Changed
 
 - Documented that native JS/TS hook factories must live in `.omp/hooks/pre/` or `.omp/hooks/post/` (not directly in `.omp/hooks/`), and cross-linked the hooks and extension-loading docs ([#11942](https://github.com/can1357/oh-my-pi/issues/11942)).

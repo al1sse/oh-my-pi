@@ -47,6 +47,7 @@ function initializeRunnerForTest(runner: ExtensionRunner | undefined): void {
 	const actions: ExtensionActions = {
 		sendMessage: () => {},
 		sendUserMessage: () => {},
+		admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 		appendEntry: () => {},
 		setLabel: () => {},
 		getActiveTools: () => [],
