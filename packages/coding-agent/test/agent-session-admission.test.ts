@@ -334,7 +334,7 @@ describe("AgentSession atomic user-message admission", () => {
 		// case pins is that the revoked reservation left nothing behind.
 	});
 
-	it("holds ownership across a continuation and releases it only at the terminal settle", async () => {
+	it("refuses admission at an intermediate settle and frees the session only at the terminal one", async () => {
 		collapseSchedulerSettleDelays();
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		const contexts: Context[] = [];
@@ -385,14 +385,17 @@ describe("AgentSession atomic user-message admission", () => {
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
 
-		const run = session.prompt("first");
+		// Drive the run through admission so the gap probe observes an owned session,
+		// not just an ordinary run's own streaming state.
+		const admitted = await session.admitUserMessage("first");
+		expect(admitted.accepted).toBe(true);
 		await gapProbe.promise;
-		await run;
 		await session.waitForIdle();
 
 		expect(duringGap).toEqual([{ accepted: false, reason: "busy" }]);
 		expect(contexts).toHaveLength(2);
-		// Only the terminal settle releases the session, so a fresh admission then succeeds.
+		// Only the terminal settle releases the reservation, so a fresh admission then
+		// succeeds — and one taken before that settle never would have.
 		const afterSettle = await session.admitUserMessage("AFTER_SETTLE");
 		expect(afterSettle.accepted).toBe(true);
 	});
@@ -437,6 +440,70 @@ describe("AgentSession atomic user-message admission", () => {
 		// The steer reached the *same* run's next provider call, not a second run.
 		expect(submittedUserTexts([contexts[0]!])).toEqual(["initial message"]);
 		expect(submittedUserTexts([contexts[1]!])).toEqual(["initial message", "STEERED_WHILE_RUNNING"]);
+	});
+
+	it("does not execute a registered extension command from admitted text", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const contexts: Context[] = [];
+		let commandRuns = 0;
+		let api: ExtensionAPI | undefined;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				api = pi;
+				pi.registerCommand("admission-probe-command", {
+					description: "must not run for an admitted message",
+					handler: async () => {
+						commandRuns++;
+					},
+				});
+			},
+			tempDir.path(),
+			new EventBus(),
+			extensionRuntime,
+			"admission-command-guard",
+		);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				return completedStream(assistantMessage(model, [{ type: "text", text: "Done." }], "stop"));
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+		});
+
+		if (!api) throw new Error("extension factory did not receive the API");
+		// Admitted text is submitted verbatim; it is never routed through command
+		// handling or template expansion.
+		const submitted = "/admission-probe-command argument";
+		const result = await api.admitUserMessage(submitted);
+
+		expect(result.accepted).toBe(true);
+		if (!result.accepted) throw new Error("expected the command-looking message to be admitted");
+		expect(commandRuns).toBe(0);
+		expect(entryText(sessionManager.getEntry(result.inputEntryId))).toBe(submitted);
+		await session.waitForIdle();
+		expect(submittedUserTexts(contexts)).toEqual([submitted]);
 	});
 
 	it("exposes the primitive to extensions through the print/RPC runtime wiring", async () => {
