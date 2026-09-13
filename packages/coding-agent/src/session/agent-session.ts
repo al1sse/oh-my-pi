@@ -257,6 +257,7 @@ import type {
 	SessionOAuthAccountList,
 	SessionStats,
 	UsageFallbackConfirmer,
+	UserMessageAdmissionResult,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
 import {
@@ -485,6 +486,49 @@ type SetSessionNameWithTrigger = (
 
 const kPersistedSessionEntryId = Symbol("persistedSessionEntryId");
 type PersistedAssistantMessage = AssistantMessage & { [kPersistedSessionEntryId]?: string };
+
+/**
+ * One in-flight {@link AgentSession.admitUserMessage} reservation.
+ *
+ * The claim is published synchronously by `admitUserMessage` and stays held
+ * until the run it owns settles terminally, so the session reports a busy
+ * state for the whole admission instead of only the spans where a turn is
+ * actually streaming (a scheduled continuation leaves `#promptInFlightCount`
+ * at zero between turns).
+ */
+type AdmissionClaim = {
+	/** The admitted message object, bound at construction. Its persistence is what
+	 *  supplies {@link UserMessageAdmissionResult} `inputEntryId`. */
+	message?: AgentMessage;
+	/** Reports a bounded admission outcome exactly once. */
+	settle: (result: UserMessageAdmissionResult) => void;
+	/** Reports a dispatch failure exactly once. */
+	fail: (error: unknown) => void;
+	settled: boolean;
+};
+
+/**
+ * Split a user-message payload into its text and image halves. Both submission
+ * paths accept the same two shapes, and the admitted path must record exactly
+ * the text a caller submitted, so the split lives in one place rather than
+ * being re-derived per caller.
+ */
+function splitUserMessageContent(content: string | (TextContent | ImageContent)[]): {
+	text: string;
+	images: ImageContent[] | undefined;
+} {
+	if (typeof content === "string") return { text: content, images: undefined };
+	const textParts: string[] = [];
+	const images: ImageContent[] = [];
+	for (const part of content) {
+		if (part.type === "text") {
+			textParts.push(part.text);
+		} else {
+			images.push(part);
+		}
+	}
+	return { text: textParts.join("\n"), images: images.length > 0 ? images : undefined };
+}
 
 /**
  * Clone one top-level notification field without ever returning an object owned
@@ -776,6 +820,11 @@ export class AgentSession {
 	readonly #loopGuards: LoopGuards;
 	#promptInFlightCount = 0;
 	#abortInProgress = false;
+	/** The single in-flight atomic admission (see {@link admitUserMessage}). While
+	 *  set, the session reports itself streaming so every competing submission —
+	 *  a host's typed prompt, an RPC message, or another extension — queues or
+	 *  refuses instead of racing this admission into a steer. */
+	#admission: AdmissionClaim | undefined;
 	// Wire-level agent_end emission deferred until #promptInFlightCount drops to 0.
 	// Internal extension hooks and post-emit work (auto-retry, auto-compaction, todo
 	// checks in #handleAgentEvent) still fire on the original schedule — only the
@@ -1150,6 +1199,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
+		this.#abandonAdmission();
 		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
@@ -2748,6 +2798,13 @@ export class AgentSession {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
 		const entryId = this.sessionManager.appendMessage(message);
+		// An admitted input reports the id of the entry its own message object
+		// produced — the native identity, matched by reference rather than by
+		// content, position, or timestamp.
+		const admission = this.#admission;
+		if (admission !== undefined && admission.message === message) {
+			this.#settleAdmission(admission, { accepted: true, inputEntryId: entryId });
+		}
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
 		}
@@ -3306,6 +3363,15 @@ export class AgentSession {
 				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
 					logger.error("Agent end extension notification failed", { err });
 				});
+				// Ownership ends only at a genuine terminal settle. A scheduled
+				// continuation, an async wake, or a session_stop hook settles with
+				// `willContinue`, and the run an admission owns is not over at that
+				// point — releasing there would let a competing admission claim the
+				// session between the continuation's turns. This handler runs while its
+				// own run is still unwinding, so it can only end the reservation that
+				// run holds: no admission can be taken between a run going idle and its
+				// settle being observed here.
+				if (options?.willContinue !== true) this.#abandonAdmission();
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -4522,6 +4588,9 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		// Disposal terminates any admission the session still owns, so a caller
+		// waiting on one is told the run never started instead of hanging.
+		this.#abandonAdmission();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
 		this.#usagePreflightReadyForNextModelCall = false;
@@ -5138,9 +5207,12 @@ export class AgentSession {
 		return this.#models.serviceTierByFamily;
 	}
 
-	/** Whether agent is currently streaming a response */
+	/** Whether agent is currently streaming a response, or an admitted dispatch
+	 *  currently owns the session. The reservation is included deliberately: it is
+	 *  what makes a competing submission see a busy session during the admitted
+	 *  dispatch's own pre-dispatch awaits, instead of starting a second run. */
 	get isStreaming(): boolean {
-		return this.agent.state.isStreaming || this.#promptInFlightCount > 0;
+		return this.agent.state.isStreaming || this.#promptInFlightCount > 0 || this.#admission !== undefined;
 	}
 
 	get isAborting(): boolean {
@@ -6124,6 +6196,15 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		return this.#runPrompt(text, options);
+	}
+
+	/**
+	 * The prompt implementation. `admission` is supplied only by
+	 * {@link admitUserMessage}, and exempts exactly this call frame — the claim
+	 * object travelling with the arguments — from the streaming gates below.
+	 */
+	async #runPrompt(text: string, options?: PromptOptions, admission?: AdmissionClaim): Promise<boolean> {
 		// Stamp the operator's submission instant before ANY async preprocessing —
 		// command execution, image normalization, vision-model description — so the
 		// prompt→yield delta includes the whole wait, whatever path the prompt takes.
@@ -6182,8 +6263,17 @@ export class AgentSession {
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 		}
 
-		// If streaming, queue via steer()/followUp()/aside based on option
-		if (this.isStreaming) {
+		// A dispatch carrying the session's reservation is the one caller allowed past
+		// the streaming gate: the reservation is the reason `isStreaming` is true here,
+		// and steering would hand the admitted input to a run it does not own. That
+		// authority is the claim travelling with this exact call frame — a competing
+		// prompt() during the awaits below is not exempt and sees the session as busy.
+		//
+		// A revoked reservation must not fall through to the ordinary path either: the
+		// caller has already been told nothing started, so this frame must persist and
+		// run nothing at all.
+		if (admission !== undefined && this.#admission !== admission) return false;
+		if (this.isStreaming && admission === undefined) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 
@@ -6231,8 +6321,13 @@ export class AgentSession {
 		// Re-check before dispatch so the loser queues exactly like the early
 		// branch instead of racing #promptWithMessage into AgentBusyError. No
 		// await sits between this check and #beginInFlight, so the winner's
-		// in-flight increment is visible to every later re-check.
-		if (this.isStreaming) {
+		// in-flight increment is visible to every later re-check. An admitted
+		// dispatch holds the reservation that made the session busy, so it is the
+		// one caller that passes this re-check — and, symmetrically, a reservation
+		// revoked during the awaits above ends the frame here rather than letting it
+		// persist the input its caller was told would not be sent.
+		if (admission !== undefined && this.#admission !== admission) return false;
+		if (this.isStreaming && admission === undefined) {
 			const streamingBehavior = options?.streamingBehavior;
 			if (!streamingBehavior) throw new AgentBusyError();
 			for (const notice of keywordNotices) {
@@ -6262,6 +6357,11 @@ export class AgentSession {
 					userInitiated: options?.userInitiated === true ? true : undefined,
 				}
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: submittedAt };
+
+		// Bind the admitted message object while the claim still owns the session:
+		// its persistence is what supplies the entry id the caller receives, and
+		// reference equality — not content or position — is what identifies it.
+		if (admission !== undefined && this.#admission === admission) admission.message = message;
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -6300,7 +6400,13 @@ export class AgentSession {
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
 			this.#toolChoiceQueue.removeByLabel("external-thinking");
 		}
-		if (!dispatched && message.role === "user") {
+		if (!dispatched && admission !== undefined) {
+			// The reserved run never reached the agent, so no entry exists for the
+			// admitted input: abandon the reservation, which refuses with `not_started`
+			// and frees the session. The text is deliberately not offered to the host
+			// editor — it was submitted by a caller, not typed here.
+			this.#abandonAdmission(admission);
+		} else if (!dispatched && message.role === "user") {
 			// An abort (Esc) or preflight denial raced turn setup: the prompt never
 			// reached the agent or the session file. Hand it back to the host so the
 			// user can edit/resubmit instead of losing it (tree/branch can't offer
@@ -7333,6 +7439,107 @@ export class AgentSession {
 	}
 
 	/**
+	 * Atomically admit exactly one user message into this session.
+	 *
+	 * The decision and the reservation happen in a single synchronous block, so no
+	 * competing run, prompt, or admission can interleave between them: two
+	 * simultaneous calls cannot both observe an idle session, and an admitted
+	 * message is never handed to a run it does not own. A refusal is a promise
+	 * result rather than a thrown error, and it creates no session entry and
+	 * starts no run.
+	 *
+	 * The admitted message is dispatched through the ordinary prompt pipeline with
+	 * template expansion disabled — the submitted text is never reinterpreted as a
+	 * slash command or prompt template — and without a `streamingBehavior`, so any
+	 * gate the reservation did not cover fails closed with AgentBusyError instead
+	 * of silently steering the admitted input into another run.
+	 *
+	 * Resolves with the native session entry id of the persisted input, and only
+	 * once that entry exists. `not_started` means the reserved dispatch never
+	 * reached the agent, so nothing was persisted for it.
+	 */
+	async admitUserMessage(content: string | (TextContent | ImageContent)[]): Promise<UserMessageAdmissionResult> {
+		const { text, images } = splitUserMessageContent(content);
+
+		// Everything from here to the reservation below is synchronous, and the
+		// session cannot change state in between — which is what makes a refusal
+		// truthful rather than a guess. Disposal is folded into `busy`: a disposing
+		// session accepts no input at all.
+		if (this.#isDisposed || this.isStreaming) return { accepted: false, reason: "busy" };
+		if (this.isCompacting) return { accepted: false, reason: "compacting" };
+		if (this.queuedMessageCount > 0) return { accepted: false, reason: "pending_message" };
+
+		const { promise, resolve, reject } = Promise.withResolvers<UserMessageAdmissionResult>();
+		const claim: AdmissionClaim = { settle: resolve, fail: reject, settled: false };
+		this.#admission = claim;
+
+		// Deliberately not awaited: the caller's result is settled by the admission
+		// lifecycle (the input's persistence, a terminal settle, or a dispatch bail),
+		// never by the dispatch returning. Awaiting it here would withhold the identity
+		// this call exists to report until the entire run had finished.
+		void this.#runPrompt(text, { expandPromptTemplates: false, images, userInitiated: true }, claim)
+			.then(dispatched => {
+				// Safety net for any exit that never reached the agent: the reservation is
+				// the session's, so a dispatch that started nothing must not keep it.
+				if (!dispatched) this.#abandonAdmission(claim);
+			})
+			.catch(error => {
+				// A busy error is the fail-closed result of a gate the reservation did not
+				// cover; any other failure is real, and the caller sees it as a rejection
+				// rather than as a refusal that would misreport why nothing started.
+				if (error instanceof AgentBusyError) {
+					if (claim.settled) return;
+					this.#settleAdmission(claim, { accepted: false, reason: "busy" });
+					// An admission that already reported an identity owns a live run, which a
+					// late busy error must not release.
+					this.#abandonAdmission(claim);
+					return;
+				}
+				this.#failAdmission(claim, error);
+			});
+		return await promise;
+	}
+
+	/**
+	 * Report an admission outcome exactly once. A claim that already reported an
+	 * outcome keeps it, so a later terminal settle cannot overwrite an accepted
+	 * result the caller has already received.
+	 */
+	#settleAdmission(claim: AdmissionClaim, result: UserMessageAdmissionResult): void {
+		if (claim.settled) return;
+		claim.settled = true;
+		claim.settle(result);
+	}
+
+	/**
+	 * End the reservation that owns the session and refuse any result it has not
+	 * reported yet: the reserved run never began, and no entry exists for it.
+	 *
+	 * Ownership is released only on terminal transitions — a genuine terminal settle
+	 * (see the agent_end handler), a dispatch bail, a session reset, or disposal —
+	 * never because a turn's in-flight counter reached zero, which also happens
+	 * between a continuation's turns.
+	 */
+	#abandonAdmission(claim?: AdmissionClaim): void {
+		const held = this.#admission;
+		if (held === undefined || (claim !== undefined && held !== claim)) return;
+		this.#admission = undefined;
+		this.#settleAdmission(held, { accepted: false, reason: "not_started" });
+	}
+
+	/**
+	 * End the reservation and report the failure that ended it. An admission that
+	 * already handed the caller an identity is left alone: the run it owns exists,
+	 * and its failure belongs to the run's own terminal evidence.
+	 */
+	#failAdmission(claim: AdmissionClaim, error: unknown): void {
+		if (claim.settled) return;
+		if (this.#admission === claim) this.#admission = undefined;
+		claim.settled = true;
+		claim.fail(error);
+	}
+
+	/**
 	 * Send a user message through the prompt flow.
 	 *
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
@@ -7343,25 +7550,7 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" | "aside" },
 	): Promise<void> {
-		// Normalize content to text string + optional images
-		let text: string;
-		let images: ImageContent[] | undefined;
-
-		if (typeof content === "string") {
-			text = content;
-		} else {
-			const textParts: string[] = [];
-			images = [];
-			for (const part of content) {
-				if (part.type === "text") {
-					textParts.push(part.text);
-				} else {
-					images.push(part);
-				}
-			}
-			text = textParts.join("\n");
-			if (images.length === 0) images = undefined;
-		}
+		const { text, images } = splitUserMessageContent(content);
 
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {

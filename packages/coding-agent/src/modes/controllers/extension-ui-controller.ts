@@ -178,6 +178,7 @@ export class ExtensionUiController {
 					});
 			},
 			sendUserMessage: this.#sendExtensionUserMessage,
+			admitUserMessage: content => this.ctx.session.admitUserMessage(content),
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
@@ -414,6 +415,7 @@ export class ExtensionUiController {
 					});
 			},
 			sendUserMessage: this.#sendExtensionUserMessage,
+			admitUserMessage: content => this.ctx.session.admitUserMessage(content),
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},

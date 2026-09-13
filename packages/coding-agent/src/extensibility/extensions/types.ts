@@ -63,6 +63,7 @@ import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import type { UserMessageAdmissionResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
@@ -1448,6 +1449,19 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" | "aside" },
 	): void;
 
+	/** Atomically admit one user message: start a run that owns the session, or
+	 *  refuse with a bounded reason and change nothing.
+	 *
+	 *  Unlike {@link sendUserMessage}, this never steers: while another run holds
+	 *  the session it refuses with `busy` instead of merging the content into that
+	 *  run. The decision and the reservation are atomic, so two concurrent calls
+	 *  cannot both start a run, and a refusal creates no session entry and starts
+	 *  no agent turn. Resolves with the native session entry id of the admitted
+	 *  input once that entry is persisted; `not_started` means the reserved run
+	 *  never began. The submitted text is not expanded as a slash command or
+	 *  prompt template. */
+	admitUserMessage(content: string | (TextContent | ImageContent)[]): Promise<UserMessageAdmissionResult>;
+
 	/** Append a custom entry to the session for state persistence (not sent to LLM). */
 	appendEntry<T = unknown>(customType: string, data?: T): void;
 
@@ -1670,6 +1684,11 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp" | "aside" },
 ) => void;
 
+/** Atomically admits one user message, or refuses with a bounded reason. */
+export type AdmitUserMessageHandler = (
+	content: string | (TextContent | ImageContent)[],
+) => Promise<UserMessageAdmissionResult>;
+
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
 export type GetActiveToolsHandler = () => string[];
@@ -1705,6 +1724,7 @@ export interface ExtensionRuntimeState {
 export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
+	admitUserMessage: AdmitUserMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;

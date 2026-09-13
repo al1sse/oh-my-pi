@@ -351,6 +351,46 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 }
 
+/**
+ * Why {@link AgentSession.admitUserMessage} refused to admit a message.
+ *
+ * Every reason is established inside the same synchronous block that reserves
+ * the session, so a refusal always means the session provably had no admission
+ * slot at that instant:
+ *
+ * - `busy` — a run, an in-flight or admitted dispatch, or a disposing session
+ *   already holds the session. The caller may retry once the session settles.
+ * - `compacting` — compaction owns the transcript; admitting would race the
+ *   history rewrite.
+ * - `pending_message` — input is already queued for the session (the count
+ *   `ExtensionContext.hasPendingMessages()` reports), so admitting would
+ *   interleave with delivery the caller did not submit.
+ * - `not_started` — the reservation was taken, but the run never began (a
+ *   usage preflight denial, an abort, or a session transition won the
+ *   generation race). No session entry was created.
+ *
+ * Interactive editor and modal state live in the TUI host rather than in the
+ * session, so they cannot be part of that synchronous block and are
+ * deliberately absent here.
+ */
+export type UserMessageAdmissionRejection = "busy" | "compacting" | "pending_message" | "not_started";
+
+/**
+ * Outcome of {@link AgentSession.admitUserMessage}.
+ *
+ * `accepted` reports the native identity of the input that was admitted, not a
+ * position, timestamp, or caller-generated id: `inputEntryId` is the id
+ * `SessionManager` assigned to the persistent session entry holding exactly
+ * this content.
+ */
+export type UserMessageAdmissionResult =
+	| {
+			accepted: true;
+			/** Native session entry id of the persisted admitted input. */
+			inputEntryId: string;
+	  }
+	| { accepted: false; reason: UserMessageAdmissionRejection };
+
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled
  *  before it reached the agent (an abort or usage preflight denial raced turn
  *  setup), so it was never persisted to the session. */
