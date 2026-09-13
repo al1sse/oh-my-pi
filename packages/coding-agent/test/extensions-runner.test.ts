@@ -124,6 +124,7 @@ describe("ExtensionRunner", () => {
 		const actions = {
 			sendMessage: () => {},
 			sendUserMessage: () => {},
+			admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -175,6 +176,7 @@ describe("ExtensionRunner", () => {
 			{
 				sendMessage: () => {},
 				sendUserMessage: () => {},
+				admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 				appendEntry: () => {},
 				setLabel: () => {},
 				getActiveTools: () => [],
@@ -669,6 +671,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -884,6 +887,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1105,6 +1109,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -1407,6 +1412,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2065,6 +2071,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2154,6 +2161,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: (_customType, data) => {
 						snapshots.push(data);
 					},
@@ -2225,6 +2233,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2283,6 +2292,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -2924,6 +2934,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -3512,6 +3523,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -3584,6 +3596,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],
@@ -3674,6 +3687,7 @@ describe("ExtensionRunner", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

@@ -198,6 +198,7 @@ describe("extension provider registration rollback", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

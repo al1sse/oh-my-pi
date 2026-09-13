@@ -3723,6 +3723,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 							});
 							pendingExtensionMessages.push(sendPromise);
 						},
+						admitUserMessage: content => session.admitUserMessage(content),
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
 						},
