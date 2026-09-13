@@ -33,7 +33,7 @@ Extensions can combine all of the following in one module:
 - slash commands (`pi.registerCommand(...)`)
 - keyboard shortcuts and flags
 - custom message rendering
-- session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
+- session/message injection APIs (`sendMessage`, `sendUserMessage`, `admitUserMessage`, `appendEntry`)
 
 ## Runtime model
 
@@ -117,7 +117,7 @@ Core methods:
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
-- `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
+- `sendMessage`, `sendUserMessage`, `admitUserMessage`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
@@ -201,6 +201,25 @@ Also exposed:
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
 `pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual).
+
+`pi.admitUserMessage(content)` is the strict, fail-closed sibling of `sendUserMessage`, meant for callers that must not have their input merged into somebody else's run. It checks and reserves the session in one synchronous step, so two concurrent calls cannot both start a run, and it never steers:
+
+```ts
+const result = await pi.admitUserMessage("Deploy the staging build.");
+if (result.accepted) {
+  // result.inputEntryId is the native session entry id holding exactly this input
+} else {
+  // result.reason: "busy" | "compacting" | "pending_message" | "not_started"
+}
+```
+
+- `accepted: true` resolves with `inputEntryId`, the native entry id of the persisted input, once that entry exists — never a position, timestamp, or caller-generated id.
+- `accepted: false` performs no mutation: no session entry, no agent turn, no queued message.
+- `busy` covers a live run, another admission, or a disposing session; `compacting` covers an in-flight compaction; `pending_message` covers input already queued for the session; `not_started` means the reservation was taken but the run never began (usage preflight denial, an abort, or a session transition won the race).
+- The submitted text is not expanded: no slash-command execution and no prompt-template expansion.
+- Interactive editor and modal state live in the TUI host rather than in the session, so they are not part of the refusal vocabulary.
+
+Unlike `sendUserMessage`, this call fails closed: while the reservation is held the session reports itself busy, so a competing prompt queues (or is refused, for another admission) instead of racing the admitted input into a steer.
 
 Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
 

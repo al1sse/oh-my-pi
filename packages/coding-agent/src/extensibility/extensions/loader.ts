@@ -27,6 +27,7 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import type { UserMessageAdmissionResult } from "../../session/agent-session-types";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
@@ -91,6 +92,10 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	sendUserMessage(): void {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+
+	admitUserMessage(): Promise<UserMessageAdmissionResult> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -269,6 +274,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		options?: { deliverAs?: "steer" | "followUp" | "aside" },
 	): void {
 		this.runtime.sendUserMessage(content, options);
+	}
+
+	admitUserMessage(content: string | (TextContent | ImageContent)[]): Promise<UserMessageAdmissionResult> {
+		return this.runtime.admitUserMessage(content);
 	}
 
 	appendEntry(customType: string, data?: unknown): void {
