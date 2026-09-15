@@ -621,7 +621,7 @@ describe("AgentSession atomic user-message admission", () => {
 		expect(submittedUserTexts(contexts)).toEqual(["FROM_EXTENSION"]);
 	});
 
-	it("does not reject RPC admission tracking for bounded refusals", async () => {
+	it("keeps RPC admission tracking refusal-aware without unhandled rejections", async () => {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
 		let api: ExtensionAPI | undefined;
 		const extensionRuntime = new ExtensionRuntime();
@@ -676,7 +676,9 @@ describe("AgentSession atomic user-message admission", () => {
 
 		expect(accepted.accepted).toBe(true);
 		expect(refused).toEqual({ accepted: false, reason: "busy" });
-		await Promise.all(tracked);
+		const trackedResults = await Promise.allSettled(tracked);
+		expect(trackedResults[0]?.status).toBe("fulfilled");
+		expect(trackedResults[1]?.status).toBe("rejected");
 		release.resolve();
 		await session.waitForIdle();
 	});
