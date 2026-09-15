@@ -51,6 +51,7 @@ const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
 		{
 			sendMessage: () => {},
 			sendUserMessage: () => {},
+			admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 			appendEntry: () => {},
 			setLabel: () => {},
 			getActiveTools: () => [],
@@ -526,6 +527,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 				{
 					sendMessage: () => {},
 					sendUserMessage: () => {},
+					admitUserMessage: async () => ({ accepted: false as const, reason: "busy" as const }),
 					appendEntry: () => {},
 					setLabel: () => {},
 					getActiveTools: () => [],

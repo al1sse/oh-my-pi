@@ -2568,6 +2568,16 @@ export class AcpAgent implements Agent {
 				sendUserMessage: (content, options) => {
 					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
 				},
+				admitUserMessage: content => {
+					const admission = record.session.admitUserMessage(content);
+					// The tracker observes failure and settlement only; the admission's
+					// result belongs to its caller.
+					this.#trackExtensionUserMessage(
+						record,
+						admission.then(() => undefined),
+					);
+					return admission;
+				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);
 				},

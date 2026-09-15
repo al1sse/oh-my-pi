@@ -90,6 +90,28 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
 				});
 			},
+			admitUserMessage: content => {
+				const admissionTask = session.admitUserMessage(content);
+				// Only an accepted admission invokes the agent, so a refusal must not be
+				// tracked as agent work the host would then wait on. Keep the tracked task
+				// rejecting on refusal so RPC scopes do not report agent work, but attach a
+				// local rejection handler for calls made outside an active RPC scope.
+				if (trackAgentInvokingMessage) {
+					const trackedAdmission = admissionTask.then(result => {
+						if (!result.accepted) throw new Error("admission refused");
+					});
+					trackedAdmission.catch(() => {});
+					trackAgentInvokingMessage(trackedAdmission);
+				} else {
+					void admissionTask.then(
+						result => {
+							if (result.accepted) markAgentInvokingMessage?.();
+						},
+						() => {},
+					);
+				}
+				return admissionTask;
+			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
 			},
