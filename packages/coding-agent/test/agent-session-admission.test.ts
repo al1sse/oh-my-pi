@@ -67,6 +67,13 @@ function assistantMessage(
 		timestamp: Date.now(),
 	};
 }
+function errorAssistantMessage(model: Model): AssistantMessage {
+	return {
+		...assistantMessage(model, [{ type: "text", text: "fatal error" }], "error"),
+		errorMessage: "permanent admission probe failure",
+		errorStatus: 400,
+	};
+}
 
 /** A stream that completes on the next microtask, like the mock provider's. */
 function completedStream(message: AssistantMessage): AssistantMessageEventStream {
@@ -188,6 +195,7 @@ describe("AgentSession atomic user-message admission", () => {
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(tempDir.path()),
@@ -196,6 +204,25 @@ describe("AgentSession atomic user-message admission", () => {
 			toolRegistry: new Map([[slowTool.name, slowTool]]),
 		});
 		return { contexts, started: started.promise, release: release.resolve };
+	}
+	/** A session whose provider returns a non-retryable terminal error. */
+	function buildErrorSession(): void {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: () => completedStream(errorAssistantMessage(model)),
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
 	}
 
 	it("admits exact content into an idle session and returns the native entry id of that input", async () => {
@@ -216,6 +243,30 @@ describe("AgentSession atomic user-message admission", () => {
 		await session!.waitForIdle();
 		expect(contexts).toHaveLength(1);
 		expect(submittedUserTexts(contexts)).toEqual([submitted]);
+	});
+	it("keeps the final assistant entry correlated to the admitted input", async () => {
+		buildSession();
+		const admitted = await session!.admitUserMessage("CORRELATION_ROOT");
+		expect(admitted.accepted).toBe(true);
+		if (!admitted.accepted) throw new Error("expected the correlation probe to be admitted");
+
+		await session!.waitForIdle();
+		const finalAssistant = [...session!.sessionManager.getBranch()]
+			.reverse()
+			.find(entry => entry.type === "message" && entry.message.role === "assistant");
+		expect(finalAssistant).toBeDefined();
+		if (!finalAssistant) throw new Error("expected a persisted final assistant entry");
+
+		let currentId: string | null = finalAssistant.parentId;
+		let foundInput = false;
+		while (currentId !== null) {
+			if (currentId === admitted.inputEntryId) {
+				foundInput = true;
+				break;
+			}
+			currentId = session!.sessionManager.getEntry(currentId)?.parentId ?? null;
+		}
+		expect(foundInput).toBe(true);
 	});
 
 	it("admits only one of two simultaneous admissions", async () => {
@@ -332,6 +383,17 @@ describe("AgentSession atomic user-message admission", () => {
 		// No re-admission assertion here: an idle abort drives its own abort-turn
 		// activity, so the session is legitimately busy again afterwards. What this
 		// case pins is that the revoked reservation left nothing behind.
+	});
+	it("releases admission ownership after a terminal error", async () => {
+		buildErrorSession();
+		const admitted = await session!.admitUserMessage("ERROR_RUN");
+		expect(admitted.accepted).toBe(true);
+		if (!admitted.accepted) throw new Error("expected the error run to be admitted");
+
+		await session!.waitForIdle();
+		const afterError = await session!.admitUserMessage("AFTER_ERROR");
+
+		expect(afterError.accepted).toBe(true);
 	});
 
 	it("refuses admission at an intermediate settle and frees the session only at the terminal one", async () => {
@@ -557,5 +619,65 @@ describe("AgentSession atomic user-message admission", () => {
 		expect(entryText(sessionManager.getEntry(result.inputEntryId))).toBe("FROM_EXTENSION");
 		await session.waitForIdle();
 		expect(submittedUserTexts(contexts)).toEqual(["FROM_EXTENSION"]);
+	});
+
+	it("does not reject RPC admission tracking for bounded refusals", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		let api: ExtensionAPI | undefined;
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				api = pi;
+			},
+			tempDir.path(),
+			new EventBus(),
+			extensionRuntime,
+			"admission-rpc-tracking",
+		);
+		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const release = Promise.withResolvers<void>();
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: () => {
+				const stream = new AssistantMessageEventStream();
+				void release.promise.then(() => {
+					const message = assistantMessage(model, [{ type: "text", text: "Done." }], "stop");
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		const tracked: Promise<unknown>[] = [];
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			trackAgentInvokingMessage: task => tracked.push(task),
+		});
+		if (!api) throw new Error("extension factory did not receive the API");
+		const accepted = await api.admitUserMessage("TRACKED_WINNER");
+		const refused = await api.admitUserMessage("TRACKED_BUSY");
+
+		expect(accepted.accepted).toBe(true);
+		expect(refused).toEqual({ accepted: false, reason: "busy" });
+		await Promise.all(tracked);
+		release.resolve();
+		await session.waitForIdle();
 	});
 });

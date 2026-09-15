@@ -93,11 +93,14 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			admitUserMessage: content => {
 				const admissionTask = session.admitUserMessage(content);
 				// Only an accepted admission invokes the agent, so a refusal must not be
-				// tracked as agent work the host would then wait on.
+				// tracked as agent work the host would then wait on. The tracking promise
+				// still resolves for refusals: the public admission result carries the
+				// bounded reason, while a rejected bookkeeping promise would become an
+				// unhandled rejection in RPC mode.
 				if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(
 						admissionTask.then(result => {
-							if (!result.accepted) throw new Error("admission refused");
+							if (result.accepted) return;
 						}),
 					);
 				} else {
